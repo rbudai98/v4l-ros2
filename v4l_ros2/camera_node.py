@@ -2,118 +2,151 @@
 
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from rcl_interfaces.msg import ParameterDescriptor
+from rclpy.parameter import Parameter
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
+import subprocess
 import cv2
 import fcntl
 from v4l2 import *
+from copy import copy
+import numpy as np
+import select
 import os
 
+
 class V4L2InterfaceNode(Node):
+
     def __init__(self):
-        print("Before super called")
         print(self)
+
+        # Set general variables
+        self.width = 1280
+        self.height = 720
+        self.process = None
+        self.query_ctrl_list = []
+        self.device = "/dev/video0"
+        self.control_device = "/dev/video0"
+        self.buffer = np.zeros(self.width * self.height * 2, dtype=np.uint8)
+
         super(V4L2InterfaceNode, self).__init__("camera_node")
-        print("Selfe initialized")
+        self.get_logger().info("Selfe initialized")
 
-        self.device = "/dev/video2"  # Adjust to your device
-        self.video_fd = open(self.device, "rb+", buffering=0)
-
+        try:
+            self.video_control_fd = open(self.control_device, "rb+", buffering=0)
+        except:
+            self.get_logger().info("Could not open requested device")
+            return
         self.bridge = CvBridge()
         self.publisher = self.create_publisher(Image, "video_frames", 10)
-
         self.declare_parameters_local()
-
+        self.add_on_set_parameters_callback(self.on_parameter_event)
+        self.init_device()
         self.timer = self.create_timer(
-            1.0 / 30.0, self.publish_frame
+            10.0 / 30.0, self.publish_frame
         )  # Adjust frame rate as needed
-
         self.get_logger().info("V4L2 Interface node has been started")
 
-    def declare_parameters_local(self):
+    def init_device(self):
+        # Start streaming using v4l2-ctl
+        self.process = subprocess.Popen(
+            [
+                "v4l2-ctl",
+                # "--device",
+                # self.device,
+                # "--set-fmt-video=width=%d,height=%d,pixelformat=BG12" % (self.width, self.height),
+                "--stream-mmap",
+                "--stream-count=-1",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
-        vd = os.open(self.device, os.O_RDWR)
-        # Prepare the query control structure
+        if self.process:
+            print("Sub-device has started")
+
+    def declare_parameters_local(self):
         queryctrl = v4l2_queryctrl()
         queryctrl.id = V4L2_CID_BASE
-        # Loop to query all controls
         while True:
             try:
-            # Query the next control
-                fcntl.ioctl(self.video_fd, VIDIOC_QUERYCTRL, queryctrl)
+                fcntl.ioctl(self.video_control_fd, VIDIOC_QUERYCTRL, queryctrl)
             except IOError:
-            # If we get an IOError, break the loop
-                os.close(vd)
                 break
 
-            # Print the control information
-        #     print(f"Control ID: {queryctrl.id}")
-        #     print(f"Name: {queryctrl.name.decode()}")
-        #     print(f"Type: {queryctrl.type}")
-        #     print(f"Minimum: {queryctrl.minimum}")
-        #     print(f"Maximum: {queryctrl.maximum}")
-        #     print(f"Step: {queryctrl.step}")
-        #     print(f"Default Value: {queryctrl.default_value}")
-        #     print(f"Flags: {queryctrl.flags}")
-        #     print()
-            if (queryctrl.name.decode() != "Camera Controls"):
-                print("Found command: ", queryctrl.name.decode())
+            if queryctrl.name.decode() != "Camera Controls":
+                self.query_ctrl_list.append(copy(queryctrl))
+                self.get_logger().info("Found command: %s " % queryctrl.name.decode())
                 desc = ParameterDescriptor(description=queryctrl.name.decode())
                 self.declare_parameter(
-                        queryctrl.name.decode(), int(self.get_control(queryctrl.id)), desc
+                    queryctrl.name.decode(), int(self.get_control(queryctrl.id)), desc
                 )
-                # Increment the control ID to query the next control
             queryctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL
 
     def get_control(self, control_id):
         control = v4l2_control()
         control.id = control_id
-        fcntl.ioctl(self.video_fd, VIDIOC_G_CTRL, control)
+        fcntl.ioctl(self.video_control_fd, VIDIOC_G_CTRL, control)
+        self.get_logger().info("Get value for: %d" % control_id)
         return control.value
 
     def set_control(self, control_id, value):
         control = v4l2_control()
         control.id = control_id
         control.value = value
-        fcntl.ioctl(self.video_fd, VIDIOC_S_CTRL, control)
+        self.get_logger().info("Set value for: %d" % control_id)
+        fcntl.ioctl(self.video_control_fd, VIDIOC_S_CTRL, control)
 
-    def on_parameter_event(self, event):
-        for changed_parameter in event.changed_parameters:
-            control_id = self.get_control_id_by_name(changed_parameter.name)
-            if control_id:
-                self.set_control(control_id, changed_parameter.value)
+    def on_parameter_event(self, params):
+        for parameter in params:
+            for tmp in range(len(self.query_ctrl_list)):
+                if self.query_ctrl_list[tmp].name.decode() == parameter.name:
+                    control_id = self.query_ctrl_list[tmp].id
+                    self.set_control(control_id, parameter.value)
 
-    def get_control_id_by_name(self, name):
-        queryctrl = v4l2_queryctrl()
-        queryctrl.id = V4L2_CTRL_FLAG_NEXT_CTRL
-
-        while True:
-            try:
-                fcntl.ioctl(self.video_fd, VIDIOC_QUERYCTRL, queryctrl)
-                if queryctrl.flags & V4L2_CTRL_FLAG_DISABLED:
-                    queryctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL
-                    continue
-                if queryctrl.name.decode() == name:
-                    return queryctrl.id
-                queryctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL
-            except Exception as e:
-                break
-        return None
+        return SetParametersResult(successful=True)
 
     def publish_frame(self):
-        ret, frame = self.capture_frame()
-        if not ret:
-            return
-
+        frame = self.capture_frame()
         msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
         self.publisher.publish(msg)
+        print("Publishing")
 
     def capture_frame(self):
-        cap = cv2.VideoCapture(self.device)
-        ret, frame = cap.read()
-        cap.release()
-        return ret, frame
+        # Read a frame from the v4l2-ctl stdout
+        # try:
+        #     raw_data = self.process.stdout.read(self.width * self.height)
+        #     if not raw_data:
+        #         self.get_logger().warning("Failed to capture frame")
+        #         return None
+
+        #     frame = np.frombuffer(raw_data, dtype=np.uint8).reshape(
+        #         (self.height, self.width, 2)
+        #     )
+        #     return frame
+        # except Exception as e:
+        #     self.get_logger().error(f"Error capturing frame: {e}")
+        #     return None
+
+        if self.process:
+            # Wait for data to be available on stdout
+            select.select([self.process.stdout.fileno()], [], [])
+            try:
+                self.process.stdout.read(self.buffer)
+            except Exception as e:
+                print(f"Error reading frame: {e}")
+                return None
+            frame = np.frombuffer(self.buffer, dtype=np.uint16)  # Adjust dtype as per your pixel format
+            frame = frame.reshape((self.height, self.width))  # Reshape according to frame dimensions
+            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR)
+            return frame_bgr
+
+    def destroy_node(self):
+        if self.process:
+            self.process.terminate()
+        super().destroy_node()
 
 
 def main(args=None):
@@ -126,7 +159,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.video_fd.close(node.video_fd)
+        node.video_control_fd.close()
         node.destroy_node()
         rclpy.shutdown()
 
