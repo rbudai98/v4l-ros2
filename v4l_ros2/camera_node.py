@@ -23,11 +23,12 @@ class V4L2InterfaceNode(Node):
         print(self)
 
         # Set general variables
+        self.vid = None
         self.width = 1280
         self.height = 720
         self.process = None
         self.query_ctrl_list = []
-        self.device = "/dev/video0"
+        self.streamOn = False
         self.control_device = "/dev/video0"
         self.buffer = np.zeros(self.width * self.height * 2, dtype=np.uint8)
 
@@ -40,32 +41,24 @@ class V4L2InterfaceNode(Node):
             self.get_logger().info("Could not open requested device")
             return
         self.bridge = CvBridge()
+
         self.publisher = self.create_publisher(Image, "video_frames", 10)
+
+        self.start_stop_params()
         self.declare_parameters_local()
         self.add_on_set_parameters_callback(self.on_parameter_event)
-        self.init_device()
         self.timer = self.create_timer(
             10.0 / 30.0, self.publish_frame
         )  # Adjust frame rate as needed
         self.get_logger().info("V4L2 Interface node has been started")
 
-    def init_device(self):
-        # Start streaming using v4l2-ctl
-        self.process = subprocess.Popen(
-            [
-                "v4l2-ctl",
-                # "--device",
-                # self.device,
-                # "--set-fmt-video=width=%d,height=%d,pixelformat=BG12" % (self.width, self.height),
-                "--stream-mmap",
-                "--stream-count=-1",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
+    def start_stop_params(self):
+        # Declare parameters
+        self.declare_parameter('start_button', False)
+        # Get initial parameter values
+        self.start_button = self.get_parameter('start_button').get_parameter_value().bool_value
+        self.get_logger().info(f'Start button: {self.start_button}')
 
-        if self.process:
-            print("Sub-device has started")
 
     def declare_parameters_local(self):
         queryctrl = v4l2_queryctrl()
@@ -109,39 +102,22 @@ class V4L2InterfaceNode(Node):
         return SetParametersResult(successful=True)
 
     def publish_frame(self):
-        frame = self.capture_frame()
-        msg = self.bridge.cv2_to_imgmsg(frame, encoding="bgr8")
-        self.publisher.publish(msg)
+        self.start_button = self.get_parameter('start_button').get_parameter_value().bool_value
+        if not self.start_button and self.streamOn:
+            self.vid.release()
+            self.streamOn = False
+        elif self.start_button and not self.streamOn:
+            self.vid = cv2.VideoCapture(0) 
+            self.streamOn = True
+
+        if (self.streamOn):
+            ret, frame = self.vid.read()
+            raw_reshape = frame.reshape((self.height, self.width))
+            normalized_image = cv2.normalize(raw_reshape, None, 0, 0x0fff, cv2.NORM_MINMAX)
+            grayscale_image = np.uint8(normalized_image)
+            msg = self.bridge.cv2_to_imgmsg(grayscale_image, encoding='mono8')
+            self.publisher.publish(msg)
         print("Publishing")
-
-    def capture_frame(self):
-        # Read a frame from the v4l2-ctl stdout
-        # try:
-        #     raw_data = self.process.stdout.read(self.width * self.height)
-        #     if not raw_data:
-        #         self.get_logger().warning("Failed to capture frame")
-        #         return None
-
-        #     frame = np.frombuffer(raw_data, dtype=np.uint8).reshape(
-        #         (self.height, self.width, 2)
-        #     )
-        #     return frame
-        # except Exception as e:
-        #     self.get_logger().error(f"Error capturing frame: {e}")
-        #     return None
-
-        if self.process:
-            # Wait for data to be available on stdout
-            select.select([self.process.stdout.fileno()], [], [])
-            try:
-                self.process.stdout.read(self.buffer)
-            except Exception as e:
-                print(f"Error reading frame: {e}")
-                return None
-            frame = np.frombuffer(self.buffer, dtype=np.uint16)  # Adjust dtype as per your pixel format
-            frame = frame.reshape((self.height, self.width))  # Reshape according to frame dimensions
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BayerBG2BGR)
-            return frame_bgr
 
     def destroy_node(self):
         if self.process:
