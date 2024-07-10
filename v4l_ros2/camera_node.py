@@ -48,7 +48,7 @@ class V4L2InterfaceNode(Node):
         self.declare_parameters_local()
         self.add_on_set_parameters_callback(self.on_parameter_event)
         self.timer = self.create_timer(
-            10.0 / 30.0, self.publish_frame
+            1.0 / 30.0, self.publish_frame
         )  # Adjust frame rate as needed
         self.get_logger().info("V4L2 Interface node has been started")
 
