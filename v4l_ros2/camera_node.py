@@ -24,12 +24,12 @@ class V4L2InterfaceNode(Node):
 
         # Set general variables
         self.vid = None
-        self.width = 1280
-        self.height = 720
+        self.width = 1280        # Update according to your sensor
+        self.height = 720        # Update according to your sensor
         self.process = None
         self.query_ctrl_list = []
         self.streamOn = False
-        self.control_device = "/dev/video0"
+        self.control_device = "/dev/video0"    # Update according to your sensor
         self.buffer = np.zeros(self.width * self.height * 2, dtype=np.uint8)
 
         super(V4L2InterfaceNode, self).__init__("camera_node")
